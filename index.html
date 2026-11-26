@@ -92,7 +92,7 @@
       <p>Ваши ответы получены. Можно закрыть страницу.</p>
     </section>
     <div class="statistics-actions">
-      <button id="statistics-toggle" class="back" type="button" aria-controls="statistics" aria-expanded="false">Статистика исследования</button>
+      <button id="statistics-toggle" class="back" type="button" aria-controls="statistics" aria-expanded="false">Получить статистику</button>
     </div>
     <section id="statistics" class="card" hidden>
       <h2>Статистика исследования</h2>
@@ -110,7 +110,8 @@
           <thead><tr><th scope="col">Возраст, полных лет</th><th scope="col">Количество</th></tr></thead>
           <tbody id="statistics-age"></tbody>
         </table>
-        <button id="statistics-download" type="button">Выгрузить результаты (CSV)</button>
+        <button id="statistics-download" type="button">Скачать сырые ответы (CSV)</button>
+        <p id="download-status" role="status" hidden></p>
       </div>
     </section>
   </main>
@@ -282,7 +283,17 @@
     const genderLabels = Array.from(get('gender').options)
       .filter(option => option.value)
       .map(option => [option.value, option.textContent]);
-    let statistics;
+    const statisticsDownload = get('statistics-download');
+    const downloadStatus = get('download-status');
+
+    function requestReport(name) {
+      return fetch(new URL('./rpc/' + name, endpoint), {
+        method: 'POST',
+        headers: { apikey: publishableKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ access_code: statisticsCode }),
+        signal: AbortSignal.timeout(15000)
+      });
+    }
 
     function renderStatisticsRows(tbody, rows) {
       tbody.replaceChildren(...rows.map(([label, count]) => {
@@ -299,7 +310,6 @@
       statisticsToggle.setAttribute('aria-expanded', String(opening));
       if (!opening) return;
 
-      statistics = null;
       statisticsResults.hidden = true;
       if (!statisticsCode) {
         statisticsStatus.textContent = 'Для просмотра откройте ссылку на статистику, которую вам прислал организатор исследования.';
@@ -309,19 +319,14 @@
       statisticsToggle.disabled = true;
       statisticsStatus.textContent = 'Загружаем статистику…';
       try {
-        const response = await fetch(new URL('./rpc/coursework_demographic_summary', endpoint), {
-          method: 'POST',
-          headers: { apikey: publishableKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ access_code: statisticsCode }),
-          signal: AbortSignal.timeout(15000)
-        });
+        const response = await requestReport('coursework_demographic_summary');
         if (response.status === 401 || response.status === 403) {
           statisticsStatus.textContent = 'Ссылка на статистику недействительна.';
           return;
         }
         if (!response.ok) throw new Error('Statistics request failed');
         const result = await response.json();
-        statistics = {
+        const statistics = {
           total: result.total,
           gender: genderLabels.map(([key, label]) => [label, result.gender[key]]),
           ages: result.ages.map(({ age, count }) => [age, count])
@@ -341,23 +346,38 @@
       }
     });
 
-    get('statistics-download').addEventListener('click', () => {
-      if (!statistics) return;
-      const rows = [
-        ['Раздел', 'Значение', 'Количество'],
-        ['Всего', 'Завершённые анкеты', statistics.total],
-        ...statistics.gender.map(([label, count]) => ['Пол', label, count]),
-        ...statistics.ages.map(([age, count]) => ['Возраст', age, count])
-      ];
-      const csv = rows.map(row => row.join(';')).join('\r\n') + '\r\n';
-      const url = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }));
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'survey-statistics.csv';
-      document.body.append(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    statisticsDownload.addEventListener('click', async () => {
+      if (!statisticsCode) return;
+      statisticsDownload.disabled = true;
+      downloadStatus.hidden = false;
+      downloadStatus.textContent = 'Готовим файл…';
+      try {
+        const response = await requestReport('coursework_export_responses');
+        if (!response.ok) throw new Error('Export request failed');
+        const responses = await response.json();
+        const columns = (prefix, length) => Array.from(
+          { length }, (_, index) => prefix + '_' + String(index + 1).padStart(2, '0')
+        );
+        const rows = [
+          ['id', 'age', 'gender', ...columns('BFI', 60), ...columns('SHK', 56)],
+          ...responses.map(({ id, age, gender, bfi, shkuratova }) =>
+            [id, age, gender, ...bfi, ...shkuratova])
+        ];
+        const csv = rows.map(row => row.join(';')).join('\r\n') + '\r\n';
+        const url = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'responses.csv';
+        document.body.append(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        downloadStatus.hidden = true;
+      } catch {
+        downloadStatus.textContent = 'Не удалось скачать ответы. Попробуйте ещё раз.';
+      } finally {
+        statisticsDownload.disabled = false;
+      }
     });
 
     if (statisticsCode) {
